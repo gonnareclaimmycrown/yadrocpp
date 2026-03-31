@@ -10,6 +10,7 @@ private:
     uint64_t* data_;
     size_t bit_capacity_;
     size_t block_count_;
+    size_t used_blocks_;
 
     static size_t calculate_blocks(size_t bits) {
         return (bits + 63) / 64;
@@ -17,18 +18,20 @@ private:
 
 public:
     //rule of five
-    bitset() : data_(nullptr), bit_capacity_(0), block_count_(0) {}
+    bitset() : data_(nullptr), bit_capacity_(0), block_count_(0), used_blocks_(0) {}
 
     explicit bitset(size_t initial_capacity) {
         if (initial_capacity == 0) {
             data_ = nullptr;
             bit_capacity_ = 0;
             block_count_ = 0;
+            used_blocks_ = 0;
         }
         else {
             block_count_ = calculate_blocks(initial_capacity);
             bit_capacity_ = block_count_ * 64;
             data_ = new uint64_t[block_count_]();
+            used_blocks_ = 0;
         }
     }
 
@@ -36,7 +39,7 @@ public:
         delete[] data_;
     }
 
-    bitset(const bitset& other) : bit_capacity_(other.bit_capacity_), block_count_(other.block_count_) {
+    bitset(const bitset& other) : bit_capacity_(other.bit_capacity_), block_count_(other.block_count_), used_blocks_(other.used_blocks_) {
         if (block_count_ > 0) {
             data_ = new uint64_t[block_count_];
             std::memcpy(data_, other.data_, block_count_ * sizeof(uint64_t));
@@ -57,14 +60,16 @@ public:
             data_ = new_data;
             bit_capacity_ = other.bit_capacity_;
             block_count_ = other.block_count_;
+            used_blocks_ = other.used_blocks_;
         }
         return *this;
     }
 
-    bitset(bitset&& other) noexcept : data_(other.data_), bit_capacity_(other.bit_capacity_), block_count_(other.block_count_) {
+    bitset(bitset&& other) noexcept : data_(other.data_), bit_capacity_(other.bit_capacity_), block_count_(other.block_count_), used_blocks_(other.used_blocks_) {
         other.data_ = nullptr;
         other.block_count_ = 0;
         other.bit_capacity_ = 0;
+        other.used_blocks_ = 0;
     }
 
     bitset& operator=(bitset&& other) noexcept {
@@ -73,10 +78,12 @@ public:
             data_ = other.data_;
             bit_capacity_ = other.bit_capacity_;
             block_count_ = other.block_count_;
+            used_blocks_ = other.used_blocks_;
 
             other.data_ = nullptr;
             other.bit_capacity_ = 0;
             other.block_count_ = 0;
+            other.used_blocks_ = 0;
         }
 
         return *this;
@@ -105,6 +112,9 @@ public:
         size_t bit_x = k % 64;
         if (b) {
             data_[block_x] |= (1ULL << bit_x);
+            if (block_x + 1 > used_blocks_) {
+                used_blocks_ = block_x + 1;
+            }
         }
         else {
             data_[block_x] &= ~(1ULL << bit_x);
@@ -124,38 +134,48 @@ public:
 
     //set theory
     bitset union_with(const bitset& other) const {
+        // max because I don't want to lose 1's of the max bitset 
         size_t max_blocks = std::max(block_count_, other.block_count_);
         bitset result(max_blocks * 64);
 
-        for (size_t i = 0; i < max_blocks; ++i) {
-            uint64_t b1 = (i < block_count_) ? data_[i] : 0;
-            uint64_t b2 = (i < other.block_count_) ? other.data_[i] : 0;
-            result.data_[i] = b1 | b2;
+        size_t common = std::min(block_count_, other.block_count_);
+        for (size_t i = 0; i < common; ++i) {
+            result.data_[i] = data_[i] | other.data_[i];
         }
+        if (block_count_ > common) {
+            std::memcpy(result.data_ + common, data_ + common, (block_count_ - common) * sizeof(uint64_t));
+        }
+        else if (other.block_count_ > common) {
+            std::memcpy(result.data_ + common, other.data_ + common, (other.block_count_ - common) * sizeof(uint64_t));
+        }
+        result.used_blocks_ = std::max(used_blocks_, other.used_blocks_);
         return result;  
     }
 
     bitset intersection(const bitset& other) const {
         // intersection with nonexistent bits will result in 0 anyway so I choose min out of two sizes
-        size_t min_blocks = std::min(block_count_, other.block_count_);
-        bitset result(min_blocks * 64);
+        size_t min_used = std::min(used_blocks_, other.used_blocks_);
+        bitset result(min_used * 64);
 
-        for (size_t i = 0; i < min_blocks; ++i) {
+        for (size_t i = 0; i < min_used; ++i) {
             result.data_[i] = data_[i] & other.data_[i];
         }
+        result.used_blocks_ = min_used;
         return result;
     }
 
     bool is_subset(const bitset& other) const {
-        size_t min_blocks = std::min(block_count_, other.block_count_);
-        for (size_t i = 0; i < min_blocks; ++i) {
-            if ((data_[i] & ~other.data_[i]) != 0) {
-                return false;
+        if (used_blocks_ > other.used_blocks_) {
+            for (size_t i = other.used_blocks_; i < used_blocks_; ++i) {
+                if (data_[i] != 0) {
+                    return false;
+                }
             }
         }
 
-        for (size_t i = min_blocks; i < block_count_; ++i) {
-            if (data_[i] != 0) {
+        size_t border = std::min(used_blocks_, other.used_blocks_);
+        for (size_t i = 0; i < border; ++i) {
+            if ((data_[i] & ~other.data_[i]) != 0) {
                 return false;
             }
         }
@@ -168,7 +188,7 @@ public:
     }
 
     bool empty() const {
-        for (size_t i = 0; i < block_count_; ++i) {
+        for (size_t i = 0; i < used_blocks_; ++i) {
             if (data_[i] != 0) {
                 return false;
             }
@@ -178,6 +198,7 @@ public:
 
     void clear() {
         std::memset(data_, 0, block_count_ * sizeof(uint64_t));
+        used_blocks_ = 0;
     }
 
 };
